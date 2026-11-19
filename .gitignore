@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+
+# 环境与凭据
+.env
+.env.*
+!.env.example
+data/*.db
+data/*.sqlite
+data/credentials/
+*.key
+
+# 测试与缓存
+.pytest_cache/
+.mypy_cache/
+*.log
