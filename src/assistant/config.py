@@ -27,6 +27,10 @@ class Settings:
     history_limit: int = 0          # 0 = 不截断
     data_dir: Path = field(default_factory=lambda: Path("data"))
 
+    # Phase 1B：生活事件自动记录与回忆
+    auto_record: bool = True        # 每轮对话后是否自动抽取并记录事件
+    events_db: str = "events.db"    # EventStore 数据库文件名
+
     @classmethod
     def from_env(cls, env_file: str | Path | None = None) -> "Settings":
         load_dotenv(env_file) if env_file else load_dotenv()
@@ -51,4 +55,6 @@ class Settings:
             hook_enabled=_bool("ASSISTANT_HOOK_ENABLED", True),
             history_limit=max(0, _int("ASSISTANT_HISTORY_LIMIT", 0)),
             data_dir=Path(os.getenv("ASSISTANT_DATA_DIR", "data")),
+            auto_record=_bool("ASSISTANT_AUTO_RECORD", True),
+            events_db=os.getenv("ASSISTANT_EVENTS_DB", "events.db").strip(),
         )

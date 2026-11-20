@@ -14,8 +14,10 @@ import sys
 os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
 
 from assistant.config import Settings
-from assistant.core import Conversation, build_agent, log_turn_hook
+from assistant.core import Conversation, build_agent, log_turn_hook, make_record_hook
 from assistant.providers import build_provider
+from assistant.recall import ModelEventExtractor, SQLiteEventStore
+from assistant.recall.tools import register_recall_tools
 from assistant.tools import build_default_registry
 
 EXIT_COMMANDS = {"exit", "quit", "q", "退出", "bye"}
@@ -45,17 +47,27 @@ def main() -> None:
     settings = Settings.from_env()
     provider = build_provider(settings)
     registry = build_default_registry()
+
+    # Phase 1B：生活事件存储 + 回忆工具
+    store = SQLiteEventStore(settings.data_dir / settings.events_db)
+    register_recall_tools(registry, store)
+
     agent = build_agent(settings, registry, provider)
 
     conversation = Conversation(agent=agent, history_limit=settings.history_limit)
+    extractor = None
     if settings.hook_enabled:
         conversation.add_hook(log_turn_hook)
+    if settings.auto_record:
+        extractor = ModelEventExtractor(provider.get_model(), store)
+        conversation.add_hook(make_record_hook(extractor))
 
     print("=" * 56)
-    print("个人助理 · Phase 0 对话循环")
+    print("个人助理 · Phase 1B 对话循环")
     print(f"模型: {provider.description}")
     print(f"工具: {', '.join(registry.names())}")
     print(f"Hook: {'启用' if settings.hook_enabled else '关闭'}")
+    print(f"自动记录: {'启用' if settings.auto_record else '关闭'}（事件库 {store.db_path}）")
     print("输入 exit / quit / 退出 结束对话")
     print("=" * 56)
 
