@@ -10,6 +10,7 @@ build/
 .env
 .env.*
 !.env.example
+.ghconfig/
 data/*.db
 data/*.sqlite
 data/credentials/
