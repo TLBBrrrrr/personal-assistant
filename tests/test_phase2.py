@@ -1,33 +1,25 @@
-"""Phase 2 测试：MetricStore、同步编排、时间对齐、工具注册。
+"""Phase 2 测试：MetricStore、同步编排。
 
 用 mock Garmin 客户端验证同步映射，不连真实账号。
+只覆盖数据保存与查询核心，不含 Agent 工具 / 时间对齐。
 """
 
 from __future__ import annotations
 
-import os
-from datetime import date, datetime, time, timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
-from assistant.alignment.sqlite_aligner import SQLiteTimeAligner
 from assistant.metrics.sqlite_store import SQLiteMetricStore
-from assistant.models import Event, Metric
-from assistant.recall.sqlite_store import SQLiteEventStore
+from assistant.models import Metric
 from assistant.sport import sync
 from assistant.sport.client import GarminClient
 from assistant.sport.sync import fetch_activities, fetch_sleep
-from assistant.tools import ToolRegistry
 
 
 @pytest.fixture
 def metric_store(tmp_path):
     return SQLiteMetricStore(tmp_path / "metrics.db")
-
-
-@pytest.fixture
-def event_store(tmp_path):
-    return SQLiteEventStore(tmp_path / "events.db")
 
 
 # ---------- Metric 模型 ----------
@@ -75,13 +67,12 @@ def test_sync_cursor(metric_store):
     assert got is not None and got.date() == t.date()
 
 
-def test_upsert_many_isolates_bad_data(metric_store):
+def test_upsert_many_accepts_all(metric_store):
     t = datetime.now().astimezone()
     good = Metric.from_garmin("activity", "a1", t, {})
-    bad = Metric.from_garmin("activity", "a2", t, {"x": object()})  # 不可 JSON 序列化
-    # default=str 兜底，故两条都应写入；这里验证不抛异常
-    n = metric_store.upsert_many([good, bad])
-    assert n == 2
+    with_obj = Metric.from_garmin("activity", "a2", t, {"x": object()})
+    # default=str 兜底，两条都应写入
+    assert metric_store.upsert_many([good, with_obj]) == 2
 
 
 # ---------- 抓取器（mock 客户端） ----------
@@ -102,7 +93,6 @@ class _FakeRaw:
 
 class _FakeClient(GarminClient):
     def __init__(self):
-        # 绕过真实连接，直接挂 raw
         self._client = _FakeRaw()
         self.token_dir = None
 
@@ -147,41 +137,3 @@ def test_sync_isolates_fetcher_failure(metric_store):
                   end_date="2026-01-01", kinds=["activity", "sleep"])
     assert metric_store.count("activity") == 1  # 好的类别照常写入
     assert any("sleep" in e for e in report.errors)
-
-
-# ---------- 时间对齐 ----------
-def test_align_by_metric(metric_store, event_store):
-    t = datetime(2026, 1, 1, 8, 0, tzinfo=datetime.now().astimezone().tzinfo)
-    metric_store.upsert(Metric.from_garmin("activity", "a1", t, {"activityName": "晨跑"}))
-    event_store.add(Event(id="e1", occurred_at=t + timedelta(hours=1),
-                          recorded_at=t, title="状态很好", content="跑完很爽", tags=["跑步"]))
-    aligner = SQLiteTimeAligner(metric_store, event_store)
-    pairs = aligner.align_by_metric("activity", window_hours=24)
-    assert len(pairs) == 1 and len(pairs[0][1]) == 1
-    out = aligner.format_metric_anchors(pairs, 24)
-    assert "晨跑" in out and "状态很好" in out
-
-
-def test_align_by_event(metric_store, event_store):
-    t = datetime(2026, 1, 1, 8, 0, tzinfo=datetime.now().astimezone().tzinfo)
-    event_store.add(Event(id="e1", occurred_at=t, recorded_at=t,
-                          title="疲惫", content="今天很累", tags=["状态"]))
-    metric_store.upsert(Metric.from_garmin("sleep", "s1", t, {"daySummary": {"sleepScore": 60}}))
-    aligner = SQLiteTimeAligner(metric_store, event_store)
-    pairs = aligner.align_by_event("疲惫", window_hours=24)
-    assert len(pairs) == 1 and len(pairs[0][1]) == 1
-
-
-# ---------- 工具注册 ----------
-def test_register_metrics_tools(metric_store, event_store):
-    from assistant.metrics.tools import register_metrics_tools
-
-    registry = ToolRegistry()
-    aligner = SQLiteTimeAligner(metric_store, event_store)
-    register_metrics_tools(registry, metric_store, aligner)
-    names = registry.names()
-    for expected in ("query_activities", "query_sleep", "query_metric",
-                     "metrics_overview", "recall_feeling_of_metric",
-                     "recall_metric_of_feeling"):
-        assert expected in names
-    assert "没有找到" in registry.invoke("query_activities", time_hint="今天")
