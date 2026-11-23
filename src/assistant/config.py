@@ -31,12 +31,9 @@ class Settings:
     auto_record: bool = True        # 每轮对话后是否自动抽取并记录事件
     events_db: str = "events.db"    # EventStore 数据库文件名
 
-    # Phase 2：佳明客观运动数据（与事件库物理分离）
+    # 佳明客观运动数据（与事件库物理分离）
     metrics_db: str = "metrics.db"          # MetricStore 数据库文件名
-    garmin_email: str | None = None
-    garmin_password: str | None = None
-    garmin_is_cn: bool = False              # 中国区账号（connect.garmin.cn）
-    garmin_token_dir: str = "data/garmin_tokens"  # SSO token 缓存目录，需 gitignore
+    garmin_api_key_file: str = ".env_garmin"  # Personal API Key 文件（裸 key 一行，需 gitignore）
 
     @classmethod
     def from_env(cls, env_file: str | Path | None = None) -> "Settings":
@@ -65,10 +62,7 @@ class Settings:
             auto_record=_bool("ASSISTANT_AUTO_RECORD", True),
             events_db=os.getenv("ASSISTANT_EVENTS_DB", "events.db").strip(),
             metrics_db=os.getenv("ASSISTANT_METRICS_DB", "metrics.db").strip(),
-            garmin_email=os.getenv("GARMIN_EMAIL") or None,
-            garmin_password=os.getenv("GARMIN_PASSWORD") or None,
-            garmin_is_cn=_bool("GARMIN_IS_CN", False),
-            garmin_token_dir=os.getenv(
-                "GARMIN_TOKEN_DIR", "data/garmin_tokens"
+            garmin_api_key_file=os.getenv(
+                "GARMIN_API_KEY_FILE", ".env_garmin"
             ).strip(),
         )

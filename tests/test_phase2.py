@@ -1,20 +1,21 @@
-"""Phase 2 测试：MetricStore、同步编排。
+"""Garmin 官方 Personal API 测试：客户端、抓取器映射、同步编排。
 
-用 mock Garmin 客户端验证同步映射，不连真实账号。
+用 mock client 验证映射与编排，不连真实 API。
 只覆盖数据保存与查询核心，不含 Agent 工具 / 时间对齐。
 """
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
 from assistant.metrics.sqlite_store import SQLiteMetricStore
 from assistant.models import Metric
-from assistant.sport import sync
-from assistant.sport.client import GarminClient
-from assistant.sport.sync import fetch_activities, fetch_sleep
+from assistant.sport import PersonalAPIClient, sync
+from assistant.sport.sync import fetch_activities, fetch_sleep, fetch_steps
 
 
 @pytest.fixture
@@ -41,7 +42,6 @@ def test_upsert_and_idempotent(metric_store):
     t = datetime.now().astimezone()
     m = Metric.from_garmin("activity", "a1", t, {"distance": 1000})
     assert metric_store.upsert(m) == m.id
-    # 同 (kind, source_id) 覆盖，不新增
     m2 = Metric.from_garmin("activity", "a1", t, {"distance": 2000})
     metric_store.upsert(m2)
     assert metric_store.count("activity") == 1
@@ -71,34 +71,98 @@ def test_upsert_many_accepts_all(metric_store):
     t = datetime.now().astimezone()
     good = Metric.from_garmin("activity", "a1", t, {})
     with_obj = Metric.from_garmin("activity", "a2", t, {"x": object()})
-    # default=str 兜底，两条都应写入
     assert metric_store.upsert_many([good, with_obj]) == 2
 
 
-# ---------- 抓取器（mock 客户端） ----------
-class _FakeRaw:
-    def get_activities_by_date(self, start, end):
-        return [{
-            "activityId": 999,
-            "startTimeLocal": "2026-01-01 07:30:00",
-            "distance": 10000,
-            "elapsedDuration": 3600,
-            "activityType": {"typeKey": "running"},
-            "activityName": "晨跑",
-        }]
-
-    def get_sleep_data(self, day):
-        return {"daySummary": {"sleepScore": 82}, "date": day}
+# ---------- API 客户端（mock urllib） ----------
+def test_client_loads_key_from_file(tmp_path):
+    key_file = tmp_path / ".env_garmin"
+    key_file.write_text("GCDC_test.key.abc\n", encoding="utf-8")
+    client = PersonalAPIClient.from_file(key_file)
+    assert client._api_key == "GCDC_test.key.abc"
 
 
-class _FakeClient(GarminClient):
-    def __init__(self):
-        self._client = _FakeRaw()
-        self.token_dir = None
+def test_client_missing_key_file(tmp_path):
+    from assistant.sport.client import GarminAPIError, load_api_key
+    with pytest.raises(GarminAPIError):
+        load_api_key(tmp_path / "nonexistent")
+
+
+def test_client_token_cached(monkeypatch, tmp_path):
+    """token 换一次后缓存，第二次 get 不重复换 token。"""
+    calls = {"token": 0, "paths": []}
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def read(self):
+            return b"hdr.payload.sig"
+
+    def fake_urlopen(req, timeout=None):
+        if req.method == "POST":
+            calls["token"] += 1
+        else:
+            calls["paths"].append(req.full_url)
+            return _json_resp([])
+        return FakeResp()
+
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    client = PersonalAPIClient("GCDC_x.y.z")
+    assert client.token() == "hdr.payload.sig"
+    assert client.token() == "hdr.payload.sig"
+    assert calls["token"] == 1
+
+
+def _json_resp(obj):
+    raw = json.dumps(obj).encode("utf-8")
+    class R:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return raw
+    return R()
+
+
+# ---------- 抓取器（mock client） ----------
+class FakeClient:
+    """按 (path, params) 返回预置响应，用于验证抓取器映射。"""
+
+    def __init__(self, routes: dict):
+        self.routes = routes
+        self.calls = []
+
+    def get(self, path, params=None):
+        self.calls.append((path, params))
+        value = self.routes.get(path)
+        if value is None:
+            # 路径式区间端点：/xxx/{start}/{end}，按最长前缀匹配
+            for key, val in self.routes.items():
+                if path.startswith(key.rstrip("/") + "/"):
+                    value = val
+                    break
+        if value is None:
+            return None
+        if callable(value):
+            return value(params)
+        return value
 
 
 def test_fetch_activities_mapping():
-    metrics = fetch_activities(_FakeClient(), "2026-01-01")
+    client = FakeClient({
+        "/activitylist-service/activities/search/activities": [
+            {
+                "activityId": 999,
+                "startTimeLocal": "2026-01-01 07:30:00",
+                "distance": 10000,
+                "elapsedDuration": 3600,
+                "activityType": {"typeKey": "running"},
+                "activityName": "晨跑",
+            }
+        ]
+    })
+    metrics = fetch_activities(client, "2026-01-01", "2026-01-31")
     assert len(metrics) == 1
     m = metrics[0]
     assert m.id == "activity:999"
@@ -108,15 +172,52 @@ def test_fetch_activities_mapping():
     assert m.end_time is not None
 
 
+def test_fetch_activities_filters_by_date():
+    client = FakeClient({
+        "/activitylist-service/activities/search/activities": [
+            {"activityId": 1, "startTimeLocal": "2025-12-31 08:00:00", "distance": 1000},
+            {"activityId": 2, "startTimeLocal": "2026-01-02 08:00:00", "distance": 2000},
+        ]
+    })
+    metrics = fetch_activities(client, "2026-01-01", "2026-01-31")
+    assert [m.source_id for m in metrics] == ["2"]
+
+
 def test_fetch_sleep_mapping():
-    metrics = fetch_sleep(_FakeClient(), "2026-01-01")
+    client = FakeClient({
+        "/sleep-service/sleep/dailySleep": {
+            "calendarDate": "2026-01-01",
+            "sleepTimeSeconds": 28800,
+            "deepSleepSeconds": 7200,
+        }
+    })
+    metrics = fetch_sleep(client, "2026-01-01", "2026-01-01")
     assert len(metrics) == 1
     assert metrics[0].id == "sleep:2026-01-01"
-    assert metrics[0].payload["daySummary"]["sleepScore"] == 82
+    assert metrics[0].payload["_sleep_hours"] == 8.0
 
 
+def test_fetch_steps_range_mapping():
+    client = FakeClient({
+        "/usersummary-service/stats/steps/daily": [
+            {"calendarDate": "2026-01-01", "totalSteps": 8000},
+            {"calendarDate": "2026-01-02", "totalSteps": 12000},
+        ]
+    })
+    metrics = fetch_steps(client, "2026-01-01", "2026-01-02")
+    assert len(metrics) == 2
+    assert {m.source_id for m in metrics} == {"2026-01-01", "2026-01-02"}
+
+
+# ---------- 同步编排 ----------
 def test_sync_writes_metrics_and_cursor(metric_store):
-    report = sync(_FakeClient(), metric_store, start_date="2026-01-01",
+    client = FakeClient({
+        "/activitylist-service/activities/search/activities": [
+            {"activityId": 1, "startTimeLocal": "2026-01-01 08:00:00", "distance": 1000}
+        ],
+        "/sleep-service/sleep/dailySleep": {"calendarDate": "2026-01-01", "sleepTimeSeconds": 100},
+    })
+    report = sync(client, metric_store, start_date="2026-01-01",
                   end_date="2026-01-01", kinds=["activity", "sleep"])
     assert metric_store.count("activity") == 1
     assert metric_store.count("sleep") == 1
@@ -127,12 +228,15 @@ def test_sync_writes_metrics_and_cursor(metric_store):
 
 
 def test_sync_isolates_fetcher_failure(metric_store):
-    class BrokenRaw(_FakeRaw):
-        def get_sleep_data(self, day):
-            raise RuntimeError("boom")
+    def boom(params):
+        raise RuntimeError("boom")
 
-    client = GarminClient.__new__(GarminClient)
-    client._client = BrokenRaw()
+    client = FakeClient({
+        "/activitylist-service/activities/search/activities": [
+            {"activityId": 1, "startTimeLocal": "2026-01-01 08:00:00"}
+        ],
+        "/sleep-service/sleep/dailySleep": boom,
+    })
     report = sync(client, metric_store, start_date="2026-01-01",
                   end_date="2026-01-01", kinds=["activity", "sleep"])
     assert metric_store.count("activity") == 1  # 好的类别照常写入

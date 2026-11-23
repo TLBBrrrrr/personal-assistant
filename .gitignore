@@ -15,11 +15,6 @@ build/
 data/*.db
 data/*.sqlite
 data/credentials/
-data/garmin_tokens/
-garmin_tokens/
-garmin_tokens.json
-oauth1_token.json
-oauth2_token.json
 *.key
 
 # 测试与缓存
