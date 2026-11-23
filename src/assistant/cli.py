@@ -13,8 +13,11 @@ import sys
 
 os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
 
+from assistant.alignment import SQLiteTimeAligner
 from assistant.config import Settings
 from assistant.core import Conversation, build_agent, log_turn_hook, make_record_hook
+from assistant.metrics import SQLiteMetricStore
+from assistant.metrics.tools import register_metrics_tools
 from assistant.providers import build_provider
 from assistant.recall import ModelEventExtractor, SQLiteEventStore
 from assistant.recall.tools import register_recall_tools
@@ -48,9 +51,14 @@ def main() -> None:
     provider = build_provider(settings)
     registry = build_default_registry()
 
-    # Phase 1B：生活事件存储 + 回忆工具
+    # Phase 1B：生活事件存储 + 回忆工具（主观）
     store = SQLiteEventStore(settings.data_dir / settings.events_db)
     register_recall_tools(registry, store)
+
+    # Phase 2：客观指标库 + 查询/对齐工具（客观，与事件库分库）
+    metric_store = SQLiteMetricStore(settings.data_dir / settings.metrics_db)
+    aligner = SQLiteTimeAligner(metric_store, store)
+    register_metrics_tools(registry, metric_store, aligner)
 
     agent = build_agent(settings, registry, provider)
 
@@ -63,11 +71,13 @@ def main() -> None:
         conversation.add_hook(make_record_hook(extractor))
 
     print("=" * 56)
-    print("个人助理 · Phase 1B 对话循环")
+    print("个人助理 · Phase 2 对话循环")
     print(f"模型: {provider.description}")
     print(f"工具: {', '.join(registry.names())}")
     print(f"Hook: {'启用' if settings.hook_enabled else '关闭'}")
     print(f"自动记录: {'启用' if settings.auto_record else '关闭'}（事件库 {store.db_path}）")
+    print(f"客观指标库: {metric_store.db_path}（{metric_store.count()} 条；"
+          f"用 scripts/sync_garmin.py 同步）")
     print("输入 exit / quit / 退出 结束对话")
     print("=" * 56)
 

@@ -25,10 +25,14 @@ def _now() -> datetime:
     return datetime.now().astimezone()
 
 
+def _local_tz():
+    return datetime.now().astimezone().tzinfo
+
+
 def _iso(dt: datetime) -> str:
-    # naive 视为本地时区，保证与库内 aware 时间字符串可比
+    # naive 视为本地时区，用 replace 而非 astimezone：避免 datetime.min/max 边界溢出
     if dt.tzinfo is None:
-        dt = dt.astimezone()
+        dt = dt.replace(tzinfo=_local_tz())
     return dt.isoformat(timespec="microseconds")
 
 
@@ -190,8 +194,8 @@ class SQLiteEventStore:
 
     @staticmethod
     def _aware(dt: datetime) -> datetime:
-        """naive datetime 按本地时区补上 tzinfo，避免与 aware 比较报错。"""
-        return dt if dt.tzinfo is not None else dt.astimezone()
+        """naive datetime 补上本地 tzinfo（用 replace 避免 datetime.min/max 溢出）。"""
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=_local_tz())
 
     @classmethod
     def _passes(cls, event: Event, time_range, tags) -> bool:
