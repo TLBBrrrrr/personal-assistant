@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -52,11 +53,16 @@ class PersonalAPIClient:
         *,
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = 20.0,
+        request_interval: float = 0.12,
+        max_retries: int = 5,
     ) -> None:
         self._api_key = api_key.strip()
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.request_interval = request_interval   # 每次请求前的最小间隔（秒），避免高频触发 429
+        self.max_retries = max_retries             # 429/5xx 的重试次数
         self._token: str | None = None
+        self._last_request_at = 0.0
 
     @classmethod
     def from_file(
@@ -65,8 +71,25 @@ class PersonalAPIClient:
         *,
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = 20.0,
+        request_interval: float = 0.12,
+        max_retries: int = 5,
     ) -> "PersonalAPIClient":
-        return cls(load_api_key(path), base_url=base_url, timeout=timeout)
+        return cls(
+            load_api_key(path),
+            base_url=base_url,
+            timeout=timeout,
+            request_interval=request_interval,
+            max_retries=max_retries,
+        )
+
+    def _throttle(self) -> None:
+        """限速：距上次请求不足 request_interval 时睡眠补齐。"""
+        if self.request_interval <= 0:
+            return
+        elapsed = time.monotonic() - self._last_request_at
+        if self._last_request_at and elapsed < self.request_interval:
+            time.sleep(self.request_interval - elapsed)
+        self._last_request_at = time.monotonic()
 
     # ---------- 认证 ----------
     def _fetch_token(self) -> str:
@@ -99,44 +122,48 @@ class PersonalAPIClient:
 
     # ---------- 数据调用 ----------
     def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        """GET 一个 JSON 端点；path 已含前导斜杠，params 自动编码。"""
+        """GET 一个 JSON 端点；path 已含前导斜杠，params 自动编码。
+
+        自带限速 + 429/5xx 指数退避重试；401/403 刷新 token 后重试。
+        这样 365 天逐日抓取（上千次调用）不会因偶发限流中断整类数据。
+        """
         url = self.base_url + path
         if params:
             clean = {k: v for k, v in params.items() if v is not None}
             if clean:
                 url += "?" + urllib.parse.urlencode(clean)
 
-        req = urllib.request.Request(
-            url,
-            method="GET",
-            headers={"Authorization": f"Bearer {self.token()}", "Accept": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                raw = resp.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as exc:
-            if exc.code in (401, 403):
-                # token 可能过期，失效一次后重试一次
-                self._token = None
-                req = urllib.request.Request(
-                    url,
-                    method="GET",
-                    headers={
-                        "Authorization": f"Bearer {self.token()}",
-                        "Accept": "application/json",
-                    },
-                )
-                try:
-                    with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                        raw = resp.read().decode("utf-8", "replace")
-                except urllib.error.HTTPError as exc2:
-                    raise self._translate(exc2) from exc2
-                except urllib.error.URLError as exc2:
-                    raise GarminAPIError(f"连接 Garmin 失败：{exc2.reason}。") from exc2
-            else:
+        refreshed = False  # token 只刷新一次，避免无效 key 死循环
+        for attempt in range(self.max_retries + 1):
+            self._throttle()
+            req = urllib.request.Request(
+                url,
+                method="GET",
+                headers={
+                    "Authorization": f"Bearer {self.token()}",
+                    "Accept": "application/json",
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    raw = resp.read().decode("utf-8", "replace")
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code in (401, 403) and not refreshed:
+                    # token 可能过期：失效后换一枚重试（只做一次）
+                    self._token = None
+                    refreshed = True
+                    continue
+                if exc.code == 429 or 500 <= exc.code < 600:
+                    if attempt < self.max_retries:
+                        time.sleep(min(2 ** attempt, 30))
+                        continue
                 raise self._translate(exc) from exc
-        except urllib.error.URLError as exc:
-            raise GarminAPIError(f"连接 Garmin 失败：{exc.reason}。请检查网络。") from exc
+            except urllib.error.URLError as exc:
+                if attempt < self.max_retries:
+                    time.sleep(min(2 ** attempt, 30))
+                    continue
+                raise GarminAPIError(f"连接 Garmin 失败：{exc.reason}。请检查网络。") from exc
 
         if not raw.strip():
             return None

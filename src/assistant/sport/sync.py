@@ -105,7 +105,22 @@ def fetch_activities(client: PersonalAPIClient, start: str, end: str) -> list[Me
     return metrics
 
 
-# ---------- 抓取器：区间端点（一次拉一段，逐条映射） ----------
+# ---------- 抓取器：区间端点（自动分段，逐条映射） ----------
+# 官方区间端点对跨度有上限（steps/stress ≤21 天，body_battery ≤30 天，
+# daily ≥90 天）。统一按 14 天一段，对所有类别都安全；超长区间自动拆分。
+RANGE_CHUNK_DAYS = 14
+
+
+def _chunks(start: str, end: str, span: int) -> list[tuple[str, str]]:
+    """把 [start, end] 闭区间按 span 天切成若干闭区间段。"""
+    days = _date_range(start, end)
+    return [
+        (chunk[0], chunk[-1])
+        for i in range(0, len(days), span)
+        if (chunk := days[i : i + span])
+    ]
+
+
 def _range_items(
     client: PersonalAPIClient,
     path: str,
@@ -115,25 +130,28 @@ def _range_items(
     params_style: str = "path",
     wrapper: str | None = None,
     date_key: str = "calendarDate",
+    max_span: int = RANGE_CHUNK_DAYS,
 ) -> list[dict]:
-    """调用区间端点并取出条目列表。
+    """调用区间端点并取出条目列表，超长区间自动分段后合并。
 
     - params_style="path"：日期走路径 /{start}/{end}
     - params_style="query"：日期走 query startDate/endDate
     - wrapper：响应是 {"<wrapper>": [...]} 时取该字段
+    - max_span：单段最大天数；超过则拆分逐段请求，避免 400/500
     """
-    if params_style == "path":
-        raw = client.get(f"{path}/{start}/{end}")
-    else:
-        raw = client.get(path, {"startDate": start, "endDate": end})
-    if wrapper:
-        raw = raw.get(wrapper) if isinstance(raw, dict) else None
-    if isinstance(raw, list):
-        return [x for x in raw if isinstance(x, dict)]
-    if isinstance(raw, dict):
-        # 单日 dict：包成一条
-        return [raw]
-    return []
+    items: list[dict] = []
+    for seg_start, seg_end in _chunks(start, end, max_span):
+        if params_style == "path":
+            raw = client.get(f"{path}/{seg_start}/{seg_end}")
+        else:
+            raw = client.get(path, {"startDate": seg_start, "endDate": seg_end})
+        if wrapper:
+            raw = raw.get(wrapper) if isinstance(raw, dict) else None
+        if isinstance(raw, list):
+            items.extend(x for x in raw if isinstance(x, dict))
+        elif isinstance(raw, dict):
+            items.append(raw)
+    return items
 
 
 def _map_daily(
