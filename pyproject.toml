@@ -24,6 +24,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/assistant"]
+include = ["src/assistant/**/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -8,8 +8,16 @@ import pytest
 
 from assistant.config import Settings
 from assistant.core import Conversation, build_agent, log_turn_hook
+from assistant.prompts import load_system_prompt
 from assistant.providers import build_provider
 from assistant.tools import ToolRegistry, build_default_registry
+
+
+def test_system_prompt_loaded_from_file():
+    prompt = load_system_prompt()
+    assert "个人助理" in prompt
+    assert "中文" in prompt
+    assert prompt == prompt.strip()  # 无首尾空白
 
 
 def test_default_registry_has_tools():

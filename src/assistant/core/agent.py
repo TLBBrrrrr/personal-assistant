@@ -5,11 +5,9 @@ from __future__ import annotations
 from pydantic_ai import Agent
 
 from assistant.config import Settings
+from assistant.prompts import load_system_prompt
 from assistant.providers import ModelProvider, build_provider
 from assistant.tools import ToolRegistry
-
-SYSTEM_PROMPT = """你是一个个人助理。你可以调用工具来获取信息或执行操作。
-回答简洁、准确。用中文回复。"""
 
 
 def build_agent(
@@ -28,7 +26,7 @@ def build_agent(
 
     agent = Agent(
         model,
-        instructions=SYSTEM_PROMPT,
+        instructions=load_system_prompt(),
         tools=tool_fns,
     )
     return agent
